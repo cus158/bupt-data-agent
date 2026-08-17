@@ -186,6 +186,21 @@ def load_schema_context() -> str:
                 )
             sections.append("\n".join(lines))
 
+        sales_min, sales_max = conn.execute(
+            "SELECT MIN(order_date), MAX(order_date) FROM sales_order"
+        ).fetchone()
+        refund_min, refund_max = conn.execute(
+            "SELECT MIN(refund_date), MAX(refund_date) FROM refund_record"
+        ).fetchone()
+
+    sections.append(
+        "DATA TEMPORAL CONTEXT\n"
+        "sales_order.order_date available range:\n"
+        f"{sales_min or 'no data'} to {sales_max or 'no data'}\n\n"
+        "refund_record.refund_date available range:\n"
+        f"{refund_min or 'no data'} to {refund_max or 'no data'}"
+    )
+
     sections.append(
         "IMPORTANT TABLE-NAME CORRECTION:\n"
         "business_terms.md mentions dim_store and dim_product, but those tables do not "
@@ -233,6 +248,17 @@ Mandatory SQL rules:
 15. A threshold such as growth > 10% or refund rate > 5% applies only when the current
     user question explicitly requests it. It is never a default rule for other growth
     or refund questions.
+16. Respect any year explicitly stated by the user. If the user mentions Q1, Q2,
+    first quarter, second quarter, or another quarter without a year, use DATA TEMPORAL
+    CONTEXT to resolve the year for the relevant date column.
+17. If the relevant business data covers exactly one calendar year, an unspecified
+    quarter means that unique year. Build the quarter with half-open boundaries. For
+    example, Q1 is January 1 inclusive to April 1 exclusive, and Q2 is April 1
+    inclusive to July 1 exclusive.
+18. If the relevant data spans multiple calendar years and the user did not specify a
+    year, never guess a year. Return a read-only SQLite SELECT containing one
+    clarification_message that asks the user to specify the year, explain the ambiguity
+    briefly in reasoning_summary, and use chart_type=none.
 
 Actual SQLite schema:
 {schema_context}
@@ -277,6 +303,7 @@ def _call_json_plan(
 ) -> SQLPlan:
     response = client.chat.completions.create(
         model=model,
+        temperature=0,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},

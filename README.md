@@ -1,8 +1,8 @@
 # BUPT 自然语言数据分析 Agent
 
 当前版本包含：Excel 导入 SQLite、Schema/数据验证、5 个题目示例的
-Golden SQL Benchmark，以及最小可运行的 CLI Text-to-SQL Agent。暂不包含
-Streamlit、LangChain、LangGraph、向量数据库或多 Agent。
+Golden SQL Benchmark，以及 CLI 和 Streamlit 两种 Text-to-SQL 入口。暂不包含
+LangChain、LangGraph、向量数据库或多 Agent。
 
 ## 项目结构
 
@@ -15,6 +15,7 @@ smoke_test.py         Golden SQL 和确定性断言
 golden_results.json   Golden SQL 的实际运行结果
 agent.py              业务知识、Text-to-SQL、SQL 安全、查询、结论与图表
 app.py                CLI 入口
+streamlit_app.py      Streamlit 单页界面
 online_test.py        真实 LLM 五题测试与 Golden Result 自动对账
 .env.example          LLM 配置模板，不包含真实 Key
 ```
@@ -53,6 +54,12 @@ python app.py
 Agent 会加载 `knowledge/*.md` 和 SQLite `PRAGMA table_info`，生成一条只读
 SQLite SQL，安全校验后执行，最多展示 200 行，再让模型仅基于实际
 查询结果生成简短结论。SQL 失败时最多自动修复一次。
+
+## 运行 Streamlit
+
+```powershell
+streamlit run streamlit_app.py
+```
 
 ## 真实 LLM Golden 对账
 
