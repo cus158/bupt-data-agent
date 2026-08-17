@@ -16,6 +16,8 @@ import pandas as pd
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from business_validator import BusinessValidationResult, validate_business_rules
+
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DB_PATH = PROJECT_DIR / "data" / "business.db"
@@ -61,6 +63,17 @@ class SQLSafetyError(AgentError):
     """Raised when generated SQL does not pass the local safety policy."""
 
 
+class BusinessRuleValidationError(AgentError):
+    """Raised when SQL clearly violates a deterministic business rule."""
+
+    def __init__(self, result: BusinessValidationResult):
+        self.result = result
+        details = "; ".join(
+            f"[{issue.rule}] {issue.message}" for issue in result.violations
+        )
+        super().__init__(f"Business Rule Validator rejected the SQL: {details}")
+
+
 class SQLExecutionError(AgentError):
     """Raised when SQLite cannot execute an otherwise safe query."""
 
@@ -74,9 +87,12 @@ class LLMConfig:
 
 @dataclass(frozen=True)
 class SQLPlan:
-    sql: str
+    sql: str | None
     reasoning_summary: str
     chart_type: str
+    status: str = "ready"
+    clarification_question: str | None = None
+    ambiguity_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,11 +106,12 @@ class AgentResult:
     question: str
     first_plan: SQLPlan
     plan: SQLPlan
-    query_result: QueryResult
-    conclusion: str
+    query_result: QueryResult | None
+    conclusion: str | None
     repair_triggered: bool
     first_error_type: str | None
     first_error_message: str | None
+    business_validation: BusinessValidationResult | None
 
 
 def load_config() -> LLMConfig:
@@ -214,6 +231,9 @@ def _sql_system_prompt(schema_context: str, business_context: str) -> str:
 
 Return exactly one JSON object with exactly these keys:
 {{
+  "status": "ready|needs_clarification",
+  "clarification_question": null,
+  "ambiguity_type": null,
   "sql": "one SQLite read-only query",
   "reasoning_summary": "a short summary of tables, metric and filters used",
   "chart_type": "bar|line|pie|none"
@@ -222,6 +242,37 @@ Return exactly one JSON object with exactly these keys:
 Do not output Markdown fences. Do not reveal private chain-of-thought. The
 reasoning_summary must be at most three short sentences and only explain which tables,
 business metric, date range and filters were used.
+
+Intent-completeness rules (apply before writing SQL):
+1. First decide whether the question has enough information for one reliable business
+   query. Business knowledge in the supplied Markdown has the highest semantic
+   priority. If it defines a term or its ranking convention, apply that definition and
+   do not ask about a generic-language ambiguity. In particular, do not second-guess a
+   documented business term merely because words such as "best" appear in it. Treat the
+   documented 动销 ranking convention as defined: rank "动销最好" by transaction sales
+   amount unless the user explicitly names another metric such as sales quantity; do
+   not ask the user to redefine that term.
+2. Set status="ready" when business knowledge or database context can uniquely resolve
+   the meaning. Then clarification_question and ambiguity_type must be null, and sql
+   must contain the read-only query.
+3. If two or more equally reasonable interpretations would materially change the SQL
+   or conclusion, set status="needs_clarification". Then sql must be null,
+   chart_type="none", ambiguity_type must briefly classify the ambiguity (for example
+   "metric", "time", "object", or "scope"), and clarification_question must ask one
+   concise, specific question in Chinese. Offer at most three common options and do not
+   turn the question into a long checklist.
+4. Vague words such as "表现" or an undocumented use of "最好" require clarification
+   when the user supplies no metric and sales quantity, transaction sales amount,
+   gross profit, gross margin, or refund loss could all reasonably answer it. For a
+   product/SKU ranking, ask whether to use sales quantity or transaction sales amount.
+   For a store or region, ask about no more than transaction sales amount, gross margin,
+   and refund loss rate. Do not add a fourth metric option.
+5. A missing Top-K count is not by itself ambiguous: an ordered result is acceptable.
+   A missing time range is also not automatically ambiguous; use the relevant available
+   data range and mention that basis. Quarter expressions follow the temporal rules
+   below.
+6. Ask only the single most blocking clarification question. Never emit guessed SQL
+   together with needs_clarification.
 
 Mandatory SQL rules:
 1. Use only tables and columns present in the supplied SQLite schema.
@@ -256,9 +307,8 @@ Mandatory SQL rules:
     example, Q1 is January 1 inclusive to April 1 exclusive, and Q2 is April 1
     inclusive to July 1 exclusive.
 18. If the relevant data spans multiple calendar years and the user did not specify a
-    year, never guess a year. Return a read-only SQLite SELECT containing one
-    clarification_message that asks the user to specify the year, explain the ambiguity
-    briefly in reasoning_summary, and use chart_type=none.
+    year, never guess a year. Return status=needs_clarification with sql=null and ask
+    the user to specify the year.
 
 Actual SQLite schema:
 {schema_context}
@@ -271,27 +321,63 @@ Business knowledge from all Markdown files:
 def _parse_sql_plan(payload: Any) -> SQLPlan:
     if not isinstance(payload, dict):
         raise LLMResponseError("LLM response must be a JSON object")
-    required_keys = {"sql", "reasoning_summary", "chart_type"}
+    required_keys = {
+        "status",
+        "clarification_question",
+        "ambiguity_type",
+        "sql",
+        "reasoning_summary",
+        "chart_type",
+    }
     if set(payload) != required_keys:
         raise LLMResponseError(
             f"LLM JSON keys must be exactly {sorted(required_keys)}; "
             f"received {sorted(payload)}"
         )
 
+    status = payload["status"]
+    clarification_question = payload["clarification_question"]
+    ambiguity_type = payload["ambiguity_type"]
     sql = payload["sql"]
     reasoning_summary = payload["reasoning_summary"]
     chart_type = payload["chart_type"]
-    if not isinstance(sql, str) or not sql.strip():
-        raise LLMResponseError("LLM response contains an empty or non-string SQL value")
+    if status not in {"ready", "needs_clarification"}:
+        raise LLMResponseError(f"Invalid status: {status!r}")
     if not isinstance(reasoning_summary, str) or not reasoning_summary.strip():
         raise LLMResponseError("LLM response contains an invalid reasoning_summary")
     if not isinstance(chart_type, str) or chart_type.lower() not in CHART_TYPES:
         raise LLMResponseError(f"Invalid chart_type: {chart_type!r}")
 
+    if status == "ready":
+        if not isinstance(sql, str) or not sql.strip():
+            raise LLMResponseError("A ready plan must contain a non-empty SQL value")
+        if clarification_question is not None or ambiguity_type is not None:
+            raise LLMResponseError(
+                "A ready plan must use null clarification_question and ambiguity_type"
+            )
+    else:
+        if sql is not None:
+            raise LLMResponseError("A clarification plan must use sql=null")
+        if chart_type.lower() != "none":
+            raise LLMResponseError("A clarification plan must use chart_type=none")
+        if not isinstance(clarification_question, str) or not clarification_question.strip():
+            raise LLMResponseError(
+                "A clarification plan must contain a clarification_question"
+            )
+        if not isinstance(ambiguity_type, str) or not ambiguity_type.strip():
+            raise LLMResponseError("A clarification plan must contain an ambiguity_type")
+
     return SQLPlan(
-        sql=sql.strip(),
+        sql=sql.strip() if isinstance(sql, str) else None,
         reasoning_summary=reasoning_summary.strip(),
         chart_type=chart_type.lower(),
+        status=status,
+        clarification_question=(
+            clarification_question.strip()
+            if isinstance(clarification_question, str)
+            else None
+        ),
+        ambiguity_type=ambiguity_type.strip() if isinstance(ambiguity_type, str) else None,
     )
 
 
@@ -346,7 +432,8 @@ def repair_sql_plan(
     schema_context: str,
     business_context: str,
 ) -> SQLPlan:
-    user_prompt = f"""The previous SQL for the question failed local validation or SQLite execution.
+    user_prompt = f"""The previous SQL for the question failed SQL safety validation,
+business-rule validation, or SQLite execution.
 
 Original question:
 {question}
@@ -503,6 +590,23 @@ def execute_query(sql: str, max_rows: int = MAX_RESULT_ROWS) -> QueryResult:
     return QueryResult(dataframe=dataframe, truncated=truncated)
 
 
+def _validate_business_and_execute(
+    question: str,
+    sql: str,
+    business_context: str,
+) -> tuple[QueryResult, BusinessValidationResult]:
+    """Keep safety and business validation separate, in that execution order."""
+    safe_sql = validate_sql(sql)
+    business_validation = validate_business_rules(
+        question,
+        safe_sql,
+        business_context,
+    )
+    if not business_validation.valid:
+        raise BusinessRuleValidationError(business_validation)
+    return execute_query(safe_sql), business_validation
+
+
 def _result_json(query_result: QueryResult) -> str:
     sample = query_result.dataframe.head(LLM_RESULT_ROWS)
     rows_json = sample.to_json(orient="records", force_ascii=False)
@@ -585,9 +689,37 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
         trace["first_plan"] = first_plan
         trace["repair_triggered"] = False
 
+    if plan.status == "needs_clarification":
+        if trace is not None:
+            trace["final_plan"] = plan
+            trace["clarification_question"] = plan.clarification_question
+            trace["ambiguity_type"] = plan.ambiguity_type
+        return AgentResult(
+            question=question,
+            first_plan=first_plan,
+            plan=plan,
+            query_result=None,
+            conclusion=None,
+            repair_triggered=False,
+            first_error_type=None,
+            first_error_message=None,
+            business_validation=None,
+        )
+
+    if plan.sql is None:
+        raise LLMResponseError("A ready plan is missing SQL")
+
     try:
-        query_result = execute_query(plan.sql)
-    except (SQLSafetyError, SQLExecutionError) as first_error:
+        query_result, business_validation = _validate_business_and_execute(
+            question,
+            plan.sql,
+            business_context,
+        )
+    except (
+        SQLSafetyError,
+        BusinessRuleValidationError,
+        SQLExecutionError,
+    ) as first_error:
         repair_triggered = True
         first_error_type = type(first_error).__name__
         first_error_message = str(first_error)
@@ -595,6 +727,8 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
             trace["repair_triggered"] = True
             trace["first_error_type"] = first_error_type
             trace["first_error_message"] = first_error_message
+            if isinstance(first_error, BusinessRuleValidationError):
+                trace["first_business_validation"] = first_error.result
         plan = repair_sql_plan(
             client,
             config.model,
@@ -604,10 +738,17 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
             schema_context,
             business_context,
         )
-        query_result = execute_query(plan.sql)
+        if plan.status != "ready" or plan.sql is None:
+            raise LLMResponseError("SQL repair unexpectedly requested clarification")
+        query_result, business_validation = _validate_business_and_execute(
+            question,
+            plan.sql,
+            business_context,
+        )
     if trace is not None:
         trace["final_plan"] = plan
         trace["query_result"] = query_result
+        trace["business_validation"] = business_validation
 
     conclusion = summarize_result(
         client,
@@ -628,6 +769,7 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
         repair_triggered=repair_triggered,
         first_error_type=first_error_type,
         first_error_message=first_error_message,
+        business_validation=business_validation,
     )
 
 

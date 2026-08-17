@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from agent import (
     AgentError,
+    BusinessRuleValidationError,
     ConfigurationError,
     LLMResponseError,
     MAX_RESULT_ROWS,
@@ -20,6 +21,7 @@ from agent import (
     create_chart,
     run_agent,
 )
+from evidence import build_query_evidence
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -70,9 +72,21 @@ def apply_selected_example() -> None:
 def execute_analysis(question: str) -> None:
     st.session_state.pop("analysis_result", None)
     st.session_state.pop("analysis_error", None)
+    st.session_state.pop("clarification", None)
+    st.session_state["last_question"] = question
 
     try:
         result = run_agent(question)
+        if result.plan.status == "needs_clarification":
+            st.session_state["clarification"] = {
+                "question": question,
+                "clarification_question": result.plan.clarification_question,
+                "ambiguity_type": result.plan.ambiguity_type,
+            }
+            return
+        if result.query_result is None or result.plan.sql is None:
+            raise AgentError("Ready plan did not return an executable query result")
+
         chart_path = None
         chart_error = None
         if result.plan.chart_type != "none":
@@ -86,11 +100,25 @@ def execute_analysis(question: str) -> None:
                 logging.exception("Chart generation failed")
                 chart_error = "图表生成失败，但不影响查询结果与分析结论。"
 
+        evidence = None
+        evidence_error = None
+        try:
+            evidence = build_query_evidence(
+                result.plan.sql,
+                question,
+                result.business_validation,
+            )
+        except Exception:
+            logging.exception("Query evidence generation failed")
+            evidence_error = "查询依据生成失败，但不影响实际查询结果。"
+
         st.session_state["analysis_result"] = {
             "question": question,
             "result": result,
             "chart_path": chart_path,
             "chart_error": chart_error,
+            "evidence": evidence,
+            "evidence_error": evidence_error,
             "model": configured_model_name(),
         }
     except ConfigurationError:
@@ -99,6 +127,9 @@ def execute_analysis(question: str) -> None:
         )
     except SQLSafetyError:
         st.session_state["analysis_error"] = "生成的 SQL 未通过安全校验。"
+    except BusinessRuleValidationError as exc:
+        messages = "；".join(issue.message for issue in exc.result.violations)
+        st.session_state["analysis_error"] = f"生成的 SQL 未通过业务规则校验：{messages}"
     except SQLExecutionError as exc:
         st.session_state["analysis_error"] = f"SQL 执行失败：{exc}"
     except LLMResponseError:
@@ -134,6 +165,13 @@ def show_result() -> None:
         st.error(error)
         return
 
+    clarification = st.session_state.get("clarification")
+    if clarification:
+        st.divider()
+        st.subheader("需要补充信息")
+        st.info(clarification["clarification_question"])
+        return
+
     state = st.session_state.get("analysis_result")
     if not state:
         return
@@ -144,6 +182,44 @@ def show_result() -> None:
     st.divider()
     st.subheader("分析结论")
     st.markdown(result.conclusion)
+
+    evidence = state.get("evidence")
+    if evidence:
+        st.subheader("查询依据")
+        with st.expander("查看查询依据", expanded=True):
+            left, right = st.columns(2)
+            with left:
+                st.markdown("**使用的数据表**")
+                for table in evidence["tables"]:
+                    st.markdown(f"- `{table}`")
+
+                if evidence["business_terms"]:
+                    st.markdown("**业务指标与术语**")
+                    for term in evidence["business_terms"]:
+                        st.markdown(f"- {term}")
+
+            with right:
+                if evidence["time_rules"]:
+                    st.markdown("**时间口径**")
+                    for rule in evidence["time_rules"]:
+                        st.markdown(f"- {rule}")
+
+                operations = evidence["filters"] + evidence["aggregation"]
+                if operations:
+                    st.markdown("**筛选与聚合**")
+                    for operation in operations:
+                        st.markdown(f"- {operation}")
+
+            for note in evidence["notes"]:
+                st.info(note)
+            for warning in evidence.get("business_warnings", []):
+                st.warning(f"业务规则提醒：{warning}")
+            st.caption(" · ".join(f"✓ {item}" for item in evidence["status"]))
+            st.caption(
+                "业务口径展示来自 knowledge Markdown；完整 SQL 仍是最终技术证据。"
+            )
+    if state.get("evidence_error"):
+        st.warning(state["evidence_error"])
 
     st.subheader("查询结果")
     if dataframe.empty:
@@ -168,6 +244,15 @@ def show_result() -> None:
 
     with st.expander("执行详情"):
         st.write(f"SQL 自动修复：{'是' if result.repair_triggered else '否'}")
+        if (
+            result.repair_triggered
+            and result.first_error_type == "BusinessRuleValidationError"
+        ):
+            st.write("首次 SQL 未通过业务规则校验 → 已自动修复一次")
+        validation = result.business_validation
+        if validation:
+            st.write(f"业务规则校验：{'通过' if validation.valid else '未通过'}")
+            st.write(f"业务规则提醒：{len(validation.warnings)} 条")
         st.write(f"结果截断：{'是' if result.query_result.truncated else '否'}")
         st.write(f"图表类型：{result.plan.chart_type}")
         st.write(f"当前模型：{state['model']}")

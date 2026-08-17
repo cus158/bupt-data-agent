@@ -39,6 +39,16 @@ def main() -> int:
         print(f"{type(exc).__name__}: {exc}")
         return 4
 
+    if result.plan.status == "needs_clarification":
+        section("需要补充信息")
+        print(result.plan.clarification_question)
+        return 0
+
+    if result.query_result is None:
+        section("运行错误")
+        print("查询未返回可展示的结果。")
+        return 3
+
     section("生成 SQL")
     print(result.plan.sql)
 
