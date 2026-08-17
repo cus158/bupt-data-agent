@@ -9,21 +9,16 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from business_validator import BusinessValidationResult, validate_business_rules
-from conversation import extract_turn_context, resolve_conversation_context
+from .business_validator import BusinessValidationResult, validate_business_rules
+from .conversation import extract_turn_context, resolve_conversation_context
+from .paths import DB_PATH, ENV_FILE, KNOWLEDGE_DIR, OUTPUTS_DIR
 
-
-PROJECT_DIR = Path(__file__).resolve().parent
-DB_PATH = PROJECT_DIR / "data" / "business.db"
-KNOWLEDGE_DIR = PROJECT_DIR / "knowledge"
-OUTPUT_DIR = PROJECT_DIR / "outputs"
 
 REAL_TABLE_NAMES = ("store_info", "product_info", "sales_order", "refund_record")
 CHART_TYPES = {"bar", "line", "pie", "none"}
@@ -118,7 +113,7 @@ class AgentResult:
 
 
 def load_config() -> LLMConfig:
-    load_dotenv(PROJECT_DIR / ".env", override=False)
+    load_dotenv(ENV_FILE, override=False)
     api_key = os.getenv("LLM_API_KEY", "").strip()
     model = os.getenv("LLM_MODEL", "").strip()
     base_url = os.getenv("LLM_BASE_URL", "").strip() or None
@@ -164,7 +159,8 @@ def load_business_context() -> str:
 def _connect_read_only() -> sqlite3.Connection:
     if not DB_PATH.is_file():
         raise FileNotFoundError(
-            f"Database not found: {DB_PATH}. Run 'python prepare_db.py' first."
+            f"Database not found: {DB_PATH}. "
+            "Run 'python -m bupt_data_agent.prepare_db' first."
         )
     conn = sqlite3.connect(f"{DB_PATH.as_uri()}?mode=ro", uri=True)
     conn.execute("PRAGMA query_only = ON")
@@ -966,8 +962,8 @@ def create_chart(
 
     axis.set_title(question[:60])
     figure.tight_layout()
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = OUTPUT_DIR / f"chart_{uuid.uuid4().hex[:8]}.png"
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = OUTPUTS_DIR / f"chart_{uuid.uuid4().hex[:8]}.png"
     figure.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(figure)
     return output_path

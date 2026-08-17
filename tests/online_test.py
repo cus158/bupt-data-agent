@@ -6,7 +6,6 @@ import json
 import math
 import os
 import re
-from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -14,7 +13,7 @@ import openai
 import pandas as pd
 from dotenv import load_dotenv
 
-from agent import (
+from bupt_data_agent.agent import (
     AgentError,
     ConfigurationError,
     LLMResponseError,
@@ -27,11 +26,11 @@ from agent import (
     load_config,
     run_agent,
 )
+from bupt_data_agent.paths import ENV_FILE, EVALUATION_DIR, OUTPUTS_DIR
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-GOLDEN_PATH = PROJECT_DIR / "golden_results.json"
-REPORT_PATH = PROJECT_DIR / "outputs" / "online_test_report.txt"
+GOLDEN_PATH = EVALUATION_DIR / "golden_results.json"
+REPORT_PATH = OUTPUTS_DIR / "online_test_report.txt"
 
 QUESTIONS = [
     "查询2025年上半年各门店的成交销额，并按销额降序排列。",
@@ -106,7 +105,8 @@ def classify_error(exc: Exception, custom_base_url: bool) -> tuple[str, bool]:
 def load_golden() -> dict:
     if not GOLDEN_PATH.is_file():
         raise FileNotFoundError(
-            f"Golden results not found: {GOLDEN_PATH}. Run 'python smoke_test.py' first."
+            f"Golden results not found: {GOLDEN_PATH}. "
+            "Run 'python tests/smoke_test.py' first."
         )
     return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 
@@ -605,7 +605,7 @@ def add_trace_to_report(lines: list[str], trace: dict) -> None:
 
 
 def main() -> int:
-    load_dotenv(PROJECT_DIR / ".env", override=False)
+    load_dotenv(ENV_FILE, override=False)
     report = ["Text-to-SQL Online Golden Benchmark", "API Key: [NEVER LOGGED]"]
 
     try:

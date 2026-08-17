@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 
-from agent import (
+from bupt_data_agent.agent import (
     LLMConfig,
     QueryResult,
     SQLPlan,
     load_business_context,
     run_agent,
 )
-from business_validator import BusinessValidationResult, validate_business_rules
+from bupt_data_agent.business_validator import (
+    BusinessValidationResult,
+    validate_business_rules,
+)
+from bupt_data_agent.paths import OUTPUTS_DIR
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-REPORT_PATH = PROJECT_DIR / "outputs" / "online_test_report.txt"
+REPORT_PATH = OUTPUTS_DIR / "online_test_report.txt"
 BUSINESS_CONTEXT = load_business_context()
 
 
@@ -216,14 +218,26 @@ def run_agent_repair_check() -> None:
     )
 
     with (
-        patch("agent.load_config", return_value=LLMConfig("hidden", "test", None)),
-        patch("agent.create_llm_client", return_value=object()),
-        patch("agent.load_business_context", return_value=BUSINESS_CONTEXT),
-        patch("agent.load_schema_context", return_value="schema"),
-        patch("agent.generate_sql_plan", return_value=first_plan),
-        patch("agent.repair_sql_plan", return_value=repaired_plan) as repair,
-        patch("agent.execute_query", return_value=query_result) as execute,
-        patch("agent.summarize_result", return_value="done"),
+        patch(
+            "bupt_data_agent.agent.load_config",
+            return_value=LLMConfig("hidden", "test", None),
+        ),
+        patch("bupt_data_agent.agent.create_llm_client", return_value=object()),
+        patch(
+            "bupt_data_agent.agent.load_business_context",
+            return_value=BUSINESS_CONTEXT,
+        ),
+        patch("bupt_data_agent.agent.load_schema_context", return_value="schema"),
+        patch(
+            "bupt_data_agent.agent.generate_sql_plan", return_value=first_plan
+        ),
+        patch(
+            "bupt_data_agent.agent.repair_sql_plan", return_value=repaired_plan
+        ) as repair,
+        patch(
+            "bupt_data_agent.agent.execute_query", return_value=query_result
+        ) as execute,
+        patch("bupt_data_agent.agent.summarize_result", return_value="done"),
     ):
         result = run_agent("查询各门店成交销额")
 

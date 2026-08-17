@@ -10,13 +10,12 @@ import sqlite3
 import time
 from collections import Counter, defaultdict
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import openai
 import pandas as pd
 
-from agent import (
+from bupt_data_agent.agent import (
     AgentError,
     ConfigurationError,
     SQLSafetyError,
@@ -25,15 +24,15 @@ from agent import (
     run_agent,
     validate_sql,
 )
-from business_validator import validate_business_rules
+from bupt_data_agent.business_validator import validate_business_rules
+from bupt_data_agent.paths import EVALUATION_DIR, OUTPUTS_DIR
 from evaluation_golden import DB_PATH, GOLDEN_QUERIES, get_golden_dataframe
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-CASES_PATH = PROJECT_DIR / "evaluation_cases.json"
-JSON_REPORT_PATH = PROJECT_DIR / "evaluation_report.json"
-MARKDOWN_REPORT_PATH = PROJECT_DIR / "evaluation_report.md"
-CORE_REPORT_PATH = PROJECT_DIR / "outputs" / "online_test_report.txt"
+CASES_PATH = EVALUATION_DIR / "evaluation_cases.json"
+JSON_REPORT_PATH = EVALUATION_DIR / "evaluation_report.json"
+MARKDOWN_REPORT_PATH = EVALUATION_DIR / "evaluation_report.md"
+CORE_REPORT_PATH = OUTPUTS_DIR / "online_test_report.txt"
 REAL_TABLES = ("store_info", "product_info", "sales_order", "refund_record")
 
 COLUMN_ALIASES: dict[str, tuple[str, ...]] = {

@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 import pandas as pd
 
+from .paths import DATA_DIR, DB_PATH, PROJECT_ROOT
 
-PROJECT_DIR = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_DIR / "data"
-DB_PATH = DATA_DIR / "business.db"
 TEMP_DB_PATH = DATA_DIR / "business.db.tmp"
 
 TABLE_ORDER = ("store_info", "product_info", "sales_order", "refund_record")
@@ -342,7 +339,7 @@ def print_validation_report() -> None:
 
 
 def main() -> None:
-    print(f"Project directory: {PROJECT_DIR}")
+    print(f"Project directory: {PROJECT_ROOT}")
     print(f"Source data directory: {DATA_DIR}")
     frames = load_workbooks()
     build_database(frames)

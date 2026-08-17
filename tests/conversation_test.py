@@ -7,8 +7,14 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from agent import LLMConfig, QueryResult, SQLPlan, load_business_context, run_agent
-from conversation import (
+from bupt_data_agent.agent import (
+    LLMConfig,
+    QueryResult,
+    SQLPlan,
+    load_business_context,
+    run_agent,
+)
+from bupt_data_agent.conversation import (
     MAX_ENTITIES_PER_TYPE,
     extract_turn_context,
     format_conversation_context,
@@ -65,7 +71,7 @@ def run_offline_tests() -> None:
     assert not case3.use_context and case3.prompt_context is None
     assert case3.clarification_question
     assert all(product_id in case3.clarification_question for product_id in ("P001", "P002", "P003"))
-    with patch("agent.load_config") as load_config:
+    with patch("bupt_data_agent.agent.load_config") as load_config:
         result = run_agent("它的毛利率呢？", conversation_context=multiple_products)
     load_config.assert_not_called()
     assert result.plan.status == "needs_clarification" and result.plan.sql is None
@@ -116,13 +122,22 @@ def run_offline_tests() -> None:
         return independent_plan
 
     with (
-        patch("agent.load_config", return_value=LLMConfig("hidden", "test", None)),
-        patch("agent.create_llm_client", return_value=object()),
-        patch("agent.load_business_context", return_value=load_business_context()),
-        patch("agent.load_schema_context", return_value="schema"),
-        patch("agent.generate_sql_plan", side_effect=generated_plan),
-        patch("agent.execute_query", return_value=query_result),
-        patch("agent.summarize_result", return_value="S003 Q2 毛利率。"),
+        patch(
+            "bupt_data_agent.agent.load_config",
+            return_value=LLMConfig("hidden", "test", None),
+        ),
+        patch("bupt_data_agent.agent.create_llm_client", return_value=object()),
+        patch(
+            "bupt_data_agent.agent.load_business_context",
+            return_value=load_business_context(),
+        ),
+        patch("bupt_data_agent.agent.load_schema_context", return_value="schema"),
+        patch("bupt_data_agent.agent.generate_sql_plan", side_effect=generated_plan),
+        patch("bupt_data_agent.agent.execute_query", return_value=query_result),
+        patch(
+            "bupt_data_agent.agent.summarize_result",
+            return_value="S003 Q2 毛利率。",
+        ),
     ):
         independent_result = run_agent(
             "查询S003 2025年Q2毛利率。",
@@ -135,7 +150,7 @@ def run_offline_tests() -> None:
     # Case 6: after clearing context, an unresolved pronoun must clarify locally.
     case6 = resolve_conversation_context("它Q2毛利率呢？", None)
     assert case6.clarification_question and not case6.use_context
-    with patch("agent.load_config") as load_config:
+    with patch("bupt_data_agent.agent.load_config") as load_config:
         cleared_result = run_agent("它Q2毛利率呢？", conversation_context=None)
     load_config.assert_not_called()
     assert cleared_result.plan.status == "needs_clarification"

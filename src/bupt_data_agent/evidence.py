@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from pathlib import Path
 
-from business_validator import BusinessValidationResult
+from .business_validator import BusinessValidationResult
+from .paths import DB_PATH, KNOWLEDGE_DIR
 
-
-PROJECT_DIR = Path(__file__).resolve().parent
-KNOWLEDGE_DIR = PROJECT_DIR / "knowledge"
-DB_PATH = PROJECT_DIR / "data" / "business.db"
 
 REAL_TABLE_NAMES = (
     "sales_order",

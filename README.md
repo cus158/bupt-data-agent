@@ -137,28 +137,46 @@ SELECT MIN(refund_date), MAX(refund_date) FROM refund_record;
 
 ```text
 bupt_data_agent/
+├─ src/
+│  └─ bupt_data_agent/
+│     ├─ __init__.py
+│     ├─ paths.py                # 项目资源路径
+│     ├─ prepare_db.py           # Excel → SQLite 初始化与验证
+│     ├─ agent.py                # Agent 主流程与 SQL 安全执行
+│     ├─ business_validator.py   # 确定性业务规则校验
+│     ├─ conversation.py         # 轻量对话上下文
+│     ├─ evidence.py             # 查询依据提取
+│     ├─ app.py                  # CLI 入口
+│     └─ streamlit_app.py        # Streamlit 单页界面
+├─ tests/
+│  ├─ smoke_test.py              # 确定性 Golden SQL Benchmark
+│  ├─ online_test.py             # 真实 LLM Core Benchmark
+│  ├─ clarification_test.py
+│  ├─ business_validator_test.py
+│  └─ conversation_test.py
+├─ evaluation/
+│  ├─ evaluation_cases.json
+│  ├─ evaluation_golden.py
+│  ├─ evaluation_runner.py
+│  ├─ evaluation_report.json
+│  ├─ evaluation_report.md
+│  └─ golden_results.json
 ├─ data/
 │  ├─ store_info.xlsx
 │  ├─ product_info.xlsx
 │  ├─ sales_order.xlsx
 │  ├─ refund_record.xlsx
-│  └─ business.db              # prepare_db.py 生成
+│  └─ business.db                # prepare_db 生成
 ├─ knowledge/
 │  ├─ business_terms.md
 │  ├─ store_info.md
 │  ├─ product_info.md
 │  ├─ sales_order.md
 │  └─ refund_record.md
-├─ outputs/                    # 图表与在线测试报告
-├─ prepare_db.py               # Excel → SQLite 初始化与验证
-├─ agent.py                    # Agent 主流程与 SQL 安全执行
-├─ app.py                      # CLI 入口
-├─ streamlit_app.py            # Streamlit 单页界面
-├─ smoke_test.py               # 确定性 Golden SQL Benchmark
-├─ online_test.py              # 真实 LLM 端到端验收
-├─ golden_results.json         # Golden SQL 实际结果基准
+├─ outputs/                      # 图表与在线测试报告
+├─ pyproject.toml                # setuptools src-layout 配置
 ├─ requirements.txt
-├─ .env.example                # LLM 配置占位，不含真实 Key
+├─ .env.example                  # LLM 配置占位，不含真实 Key
 └─ 题目说明_精简版.md
 ```
 
@@ -168,7 +186,11 @@ bupt_data_agent/
 
 ```bash
 pip install -r requirements.txt
+pip install -e .
 ```
+
+第二条命令以 editable 模式安装本项目，使 `bupt_data_agent` package
+可从 `src/` 正常导入。
 
 ### 2. 配置模型
 
@@ -185,7 +207,7 @@ LLM_MODEL=your_model_name
 ### 3. 初始化数据库
 
 ```bash
-python prepare_db.py
+python -m bupt_data_agent.prepare_db
 ```
 
 该命令从四张 Excel 创建 `data/business.db`，并验证行数、Schema、主外键、日期范围和数据库完整性。
@@ -193,25 +215,28 @@ python prepare_db.py
 ### 4. 运行 CLI
 
 ```bash
-python app.py
+python -m bupt_data_agent.app
 ```
 
 ### 5. 运行 Streamlit
 
 ```bash
-streamlit run streamlit_app.py
+streamlit run src/bupt_data_agent/streamlit_app.py
 ```
 
 ### 6. 运行确定性测试
 
 ```bash
-python smoke_test.py
+python tests/smoke_test.py
+python tests/clarification_test.py
+python tests/business_validator_test.py
+python tests/conversation_test.py
 ```
 
 ### 7. 运行真实 LLM 在线测试
 
 ```bash
-python online_test.py
+python tests/online_test.py
 ```
 
 在线测试需要有效的 API 配置，会依次执行五个自然语言问题，并将业务结果与 Golden Result 自动对账。

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from unittest.mock import patch
 
-from agent import (
+from bupt_data_agent.agent import (
     LLMConfig,
     LLMResponseError,
     SQLPlan,
@@ -85,14 +85,22 @@ def run_offline_checks() -> None:
         ambiguity_type="metric",
     )
     with (
-        patch("agent.load_config", return_value=LLMConfig("hidden", "test", None)),
-        patch("agent.create_llm_client", return_value=object()),
-        patch("agent.load_business_context", return_value="business"),
-        patch("agent.load_schema_context", return_value="schema"),
-        patch("agent.generate_sql_plan", return_value=clarification_plan),
-        patch("agent.validate_business_rules") as validate_business_rules,
-        patch("agent.execute_query") as execute_query,
-        patch("agent.summarize_result") as summarize_result,
+        patch(
+            "bupt_data_agent.agent.load_config",
+            return_value=LLMConfig("hidden", "test", None),
+        ),
+        patch("bupt_data_agent.agent.create_llm_client", return_value=object()),
+        patch("bupt_data_agent.agent.load_business_context", return_value="business"),
+        patch("bupt_data_agent.agent.load_schema_context", return_value="schema"),
+        patch(
+            "bupt_data_agent.agent.generate_sql_plan",
+            return_value=clarification_plan,
+        ),
+        patch(
+            "bupt_data_agent.agent.validate_business_rules"
+        ) as validate_business_rules,
+        patch("bupt_data_agent.agent.execute_query") as execute_query,
+        patch("bupt_data_agent.agent.summarize_result") as summarize_result,
     ):
         result = run_agent("哪个商品表现最好？")
     assert result.plan.status == "needs_clarification"

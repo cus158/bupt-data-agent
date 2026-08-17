@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from agent import AgentError, ConfigurationError, MAX_RESULT_ROWS, create_chart, run_agent
+from .agent import (
+    AgentError,
+    ConfigurationError,
+    MAX_RESULT_ROWS,
+    create_chart,
+    run_agent,
+)
 
 
 def section(title: str) -> None:

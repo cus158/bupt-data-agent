@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 import pandas as pd
 
-
-PROJECT_DIR = Path(__file__).resolve().parent
-DB_PATH = PROJECT_DIR / "data" / "business.db"
+from bupt_data_agent.paths import DB_PATH
 
 GOLDEN_QUERIES: dict[str, str] = {
     "A1": """
@@ -213,4 +210,3 @@ def get_golden_dataframe(case_id: str) -> pd.DataFrame:
         return pd.read_sql_query(GOLDEN_QUERIES[case_id], connection)
     finally:
         connection.close()
-

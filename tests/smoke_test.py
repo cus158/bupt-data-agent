@@ -5,12 +5,10 @@ from __future__ import annotations
 import math
 import json
 import sqlite3
-from pathlib import Path
 
+from bupt_data_agent.paths import DB_PATH, EVALUATION_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-DB_PATH = PROJECT_DIR / "data" / "business.db"
-GOLDEN_RESULTS_PATH = PROJECT_DIR / "golden_results.json"
+GOLDEN_RESULTS_PATH = EVALUATION_DIR / "golden_results.json"
 
 TEST_1_SQL = """
 SELECT
@@ -328,7 +326,8 @@ ORDER BY sq.store_id, q2_sales_share DESC, sq.product_id;
 def connect_read_only() -> sqlite3.Connection:
     if not DB_PATH.is_file():
         raise FileNotFoundError(
-            f"Database not found: {DB_PATH}. Run 'python prepare_db.py' first."
+            f"Database not found: {DB_PATH}. "
+            "Run 'python -m bupt_data_agent.prepare_db' first."
         )
     conn = sqlite3.connect(f"{DB_PATH.as_uri()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row

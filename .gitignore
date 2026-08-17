@@ -1,5 +1,9 @@
 .env
 __pycache__/
 *.pyc
+*.egg-info/
 outputs/
 data/business.db
+.venv/
+.venv_test/
+venv/

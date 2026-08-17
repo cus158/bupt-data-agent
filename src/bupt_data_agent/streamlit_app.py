@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 import openai
@@ -14,7 +13,7 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-from agent import (
+from bupt_data_agent.agent import (
     AgentError,
     BusinessRuleValidationError,
     ConfigurationError,
@@ -25,13 +24,12 @@ from agent import (
     create_chart,
     run_agent,
 )
-from conversation import context_display_summary
-from evidence import build_query_evidence
+from bupt_data_agent.conversation import context_display_summary
+from bupt_data_agent.evidence import build_query_evidence
+from bupt_data_agent.paths import DB_PATH, ENV_FILE, EVALUATION_DIR
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-DB_PATH = PROJECT_DIR / "data" / "business.db"
-EVALUATION_REPORT_PATH = PROJECT_DIR / "evaluation_report.json"
+EVALUATION_REPORT_PATH = EVALUATION_DIR / "evaluation_report.json"
 EXAMPLE_QUESTIONS = {
     "门店成交销额": "查询2025年上半年各门店的成交销额，并按销额降序排列。",
     "华东 O2O Top SKU": "查询2025年上半年华东战区即时零售动销最好的3个SKU。",
@@ -67,12 +65,12 @@ def apply_page_style() -> None:
 
 
 def configured_model_name() -> str:
-    load_dotenv(PROJECT_DIR / ".env", override=False)
+    load_dotenv(ENV_FILE, override=False)
     return os.getenv("LLM_MODEL", "").strip() or "未配置"
 
 
 def llm_configuration_status() -> str:
-    load_dotenv(PROJECT_DIR / ".env", override=False)
+    load_dotenv(ENV_FILE, override=False)
     return (
         "Configured"
         if os.getenv("LLM_API_KEY", "").strip()
