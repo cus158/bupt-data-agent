@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from business_validator import BusinessValidationResult, validate_business_rules
+from conversation import extract_turn_context, resolve_conversation_context
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -112,6 +113,8 @@ class AgentResult:
     first_error_type: str | None
     first_error_message: str | None
     business_validation: BusinessValidationResult | None
+    turn_context: dict[str, Any] | None
+    conversation_context_used: bool
 
 
 def load_config() -> LLMConfig:
@@ -226,7 +229,17 @@ def load_schema_context() -> str:
     return "\n\n".join(sections)
 
 
-def _sql_system_prompt(schema_context: str, business_context: str) -> str:
+def _sql_system_prompt(
+    schema_context: str,
+    business_context: str,
+    conversation_context: str | None = None,
+) -> str:
+    conversation_section = (
+        "\n\nCONVERSATION CONTEXT (bounded structured data from the previous actual "
+        f"query result):\n{conversation_context}"
+        if conversation_context
+        else ""
+    )
     return f"""You are a careful Text-to-SQL analyst for a small SQLite database.
 
 Return exactly one JSON object with exactly these keys:
@@ -274,6 +287,19 @@ Intent-completeness rules (apply before writing SQL):
 6. Ask only the single most blocking clarification question. Never emit guessed SQL
    together with needs_clarification.
 
+Conversation-context rules:
+1. The current user question always has higher priority than previous context.
+2. Use CONVERSATION CONTEXT only to resolve an explicit follow-up, pronoun, or omitted
+   reference in the current question. Never inherit an unrelated store, SKU, period,
+   channel, region, metric, threshold, or filter into an independent question.
+3. Explicit entities, dates, periods, and metrics in the current question replace any
+   conflicting values in previous context.
+4. A singular reference may inherit exactly one matching entity. If multiple matching
+   entities remain, return needs_clarification and do not choose the first result.
+5. A plural reference may inherit the complete bounded entity set from context.
+6. Context is evidence from the previous actual query result, not permission to bypass
+   schema, SQL safety, business rules, or temporal rules.
+
 Mandatory SQL rules:
 1. Use only tables and columns present in the supplied SQLite schema.
 2. Follow the Markdown business definitions exactly.
@@ -314,7 +340,7 @@ Actual SQLite schema:
 {schema_context}
 
 Business knowledge from all Markdown files:
-{business_context}
+{business_context}{conversation_section}
 """
 
 
@@ -412,13 +438,14 @@ def generate_sql_plan(
     question: str,
     schema_context: str,
     business_context: str,
+    conversation_context: str | None = None,
 ) -> SQLPlan:
     if not question.strip():
         raise ValueError("Question cannot be empty")
     return _call_json_plan(
         client,
         model,
-        _sql_system_prompt(schema_context, business_context),
+        _sql_system_prompt(schema_context, business_context, conversation_context),
         question.strip(),
     )
 
@@ -431,6 +458,7 @@ def repair_sql_plan(
     error_message: str,
     schema_context: str,
     business_context: str,
+    conversation_context: str | None = None,
 ) -> SQLPlan:
     user_prompt = f"""The previous SQL for the question failed SQL safety validation,
 business-rule validation, or SQLite execution.
@@ -449,7 +477,7 @@ system rules. Do not explain the error outside reasoning_summary."""
     return _call_json_plan(
         client,
         model,
-        _sql_system_prompt(schema_context, business_context),
+        _sql_system_prompt(schema_context, business_context, conversation_context),
         user_prompt,
     )
 
@@ -668,7 +696,46 @@ Provide a concise Chinese conclusion based only on this result."""
     return content.strip()
 
 
-def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult:
+def run_agent(
+    question: str,
+    trace: dict[str, Any] | None = None,
+    conversation_context: dict[str, Any] | None = None,
+) -> AgentResult:
+    question = question.strip()
+    if not question:
+        raise ValueError("Question cannot be empty")
+
+    context_resolution = resolve_conversation_context(question, conversation_context)
+    if context_resolution.clarification_question:
+        plan = SQLPlan(
+            sql=None,
+            reasoning_summary="当前指代缺少唯一、可靠的上一轮实体。",
+            chart_type="none",
+            status="needs_clarification",
+            clarification_question=context_resolution.clarification_question,
+            ambiguity_type="context_reference",
+        )
+        if trace is not None:
+            trace["first_plan"] = plan
+            trace["final_plan"] = plan
+            trace["repair_triggered"] = False
+            trace["clarification_question"] = plan.clarification_question
+            trace["ambiguity_type"] = plan.ambiguity_type
+            trace["conversation_context_used"] = False
+        return AgentResult(
+            question=question,
+            first_plan=plan,
+            plan=plan,
+            query_result=None,
+            conclusion=None,
+            repair_triggered=False,
+            first_error_type=None,
+            first_error_message=None,
+            business_validation=None,
+            turn_context=None,
+            conversation_context_used=False,
+        )
+
     config = load_config()
     client = create_llm_client(config)
     business_context = load_business_context()
@@ -680,6 +747,7 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
         question,
         schema_context,
         business_context,
+        context_resolution.prompt_context,
     )
     first_plan = plan
     repair_triggered = False
@@ -688,6 +756,7 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
     if trace is not None:
         trace["first_plan"] = first_plan
         trace["repair_triggered"] = False
+        trace["conversation_context_used"] = context_resolution.use_context
 
     if plan.status == "needs_clarification":
         if trace is not None:
@@ -704,6 +773,8 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
             first_error_type=None,
             first_error_message=None,
             business_validation=None,
+            turn_context=None,
+            conversation_context_used=context_resolution.use_context,
         )
 
     if plan.sql is None:
@@ -737,6 +808,7 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
             str(first_error),
             schema_context,
             business_context,
+            context_resolution.prompt_context,
         )
         if plan.status != "ready" or plan.sql is None:
             raise LLMResponseError("SQL repair unexpectedly requested clarification")
@@ -760,6 +832,13 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
     )
     if trace is not None:
         trace["conclusion"] = conclusion
+    turn_context = extract_turn_context(
+        question,
+        plan.sql,
+        query_result.dataframe,
+    )
+    if trace is not None:
+        trace["turn_context"] = turn_context
     return AgentResult(
         question=question,
         first_plan=first_plan,
@@ -770,6 +849,8 @@ def run_agent(question: str, trace: dict[str, Any] | None = None) -> AgentResult
         first_error_type=first_error_type,
         first_error_message=first_error_message,
         business_validation=business_validation,
+        turn_context=turn_context,
+        conversation_context_used=context_resolution.use_context,
     )
 
 
