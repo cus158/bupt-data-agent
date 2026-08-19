@@ -316,8 +316,12 @@ Mandatory SQL rules:
     and return one result table containing the store metrics alongside the detail rows.
 13. For low-margin SKU / margin-drag questions, provide evidence only. Do not claim
     causality.
-14. Use chart_type=pie only for an explicit, small part-to-whole result. Use bar for
-    rankings/category comparisons, line for time series, otherwise none.
+14. First determine whether the current user explicitly requests a chart or
+    visualization. If not, chart_type must be none, even when the result would be easy
+    to visualize. If the user explicitly requests bar, line, or pie, use that type. If
+    the user asks for a chart/visualization but does not specify a type, use bar for
+    rankings or category comparisons, line for continuous time series, pie only for an
+    explicit small part-to-whole result, and none when no meaningful chart can be made.
 15. A threshold such as growth > 10% or refund rate > 5% applies only when the current
     user question explicitly requests it. It is never a default rule for other growth
     or refund questions.
@@ -428,6 +432,35 @@ def _call_json_plan(
     return _parse_sql_plan(payload)
 
 
+def _apply_chart_policy(
+    question: str,
+    proposed_chart_type: str,
+    status: str,
+) -> str:
+    """Apply the user's explicit chart intent to the model's proposed chart type."""
+    if status != "ready":
+        return "none"
+
+    explicit_types = (
+        (r"柱状图|柱形图|条形图|\bbar\s+chart\b", "bar"),
+        (r"折线图|\bline\s+chart\b", "line"),
+        (r"饼图|饼状图|\bpie\s+chart\b", "pie"),
+    )
+    for pattern, chart_type in explicit_types:
+        if re.search(pattern, question, re.IGNORECASE):
+            return chart_type
+
+    chart_requested = bool(
+        re.search(
+            r"画图|绘图|图表|可视化|生成.{0,12}图|绘制.{0,12}图|画.{0,12}图|"
+            r"对比图|\bchart\b|\bvisuali[sz](?:e|ation)\b",
+            question,
+            re.IGNORECASE,
+        )
+    )
+    return proposed_chart_type if chart_requested else "none"
+
+
 def generate_sql_plan(
     client: OpenAI,
     model: str,
@@ -438,11 +471,19 @@ def generate_sql_plan(
 ) -> SQLPlan:
     if not question.strip():
         raise ValueError("Question cannot be empty")
-    return _call_json_plan(
+    plan = _call_json_plan(
         client,
         model,
         _sql_system_prompt(schema_context, business_context, conversation_context),
         question.strip(),
+    )
+    return SQLPlan(
+        sql=plan.sql,
+        reasoning_summary=plan.reasoning_summary,
+        chart_type=_apply_chart_policy(question, plan.chart_type, plan.status),
+        status=plan.status,
+        clarification_question=plan.clarification_question,
+        ambiguity_type=plan.ambiguity_type,
     )
 
 
@@ -470,11 +511,19 @@ Error:
 
 Return one corrected JSON object. Keep the original analytical intent and obey all
 system rules. Do not explain the error outside reasoning_summary."""
-    return _call_json_plan(
+    plan = _call_json_plan(
         client,
         model,
         _sql_system_prompt(schema_context, business_context, conversation_context),
         user_prompt,
+    )
+    return SQLPlan(
+        sql=plan.sql,
+        reasoning_summary=plan.reasoning_summary,
+        chart_type=_apply_chart_policy(question, plan.chart_type, plan.status),
+        status=plan.status,
+        clarification_question=plan.clarification_question,
+        ambiguity_type=plan.ambiguity_type,
     )
 
 

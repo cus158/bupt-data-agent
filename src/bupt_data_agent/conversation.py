@@ -18,11 +18,18 @@ SINGULAR_REFERENCE_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 PLURAL_REFERENCE_PATTERN = re.compile(
-    r"它们|这些(?:门店|SKU|商品)?|那些(?:门店|SKU|商品)?|"
+    r"它们|这些(?:门店|SKU|商品|产品)?|那些(?:门店|SKU|商品|产品)?|"
     r"刚才这些|刚才那些",
     flags=re.IGNORECASE,
 )
 FOLLOW_UP_PATTERN = re.compile(r"刚才|上一轮|前面(?:的)?|继续看|再看", re.IGNORECASE)
+
+LOCAL_PLURAL_REFERENCES = (
+    ("这些门店", "门店"),
+    ("这些SKU", "SKU"),
+    ("这些商品", "商品"),
+    ("这些产品", "产品"),
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +48,15 @@ def reference_mode(question: str) -> str | None:
     if FOLLOW_UP_PATTERN.search(question):
         return "follow_up"
     return None
+
+
+def _has_local_plural_antecedent(question: str) -> bool:
+    """Return whether a supported plural reference is defined earlier in this question."""
+    for reference, entity_name in LOCAL_PLURAL_REFERENCES:
+        for match in re.finditer(re.escape(reference), question, flags=re.IGNORECASE):
+            if re.search(re.escape(entity_name), question[: match.start()], re.IGNORECASE):
+                return True
+    return False
 
 
 def _extract_entities(
@@ -215,6 +231,9 @@ def resolve_conversation_context(
     context: dict[str, Any] | None,
 ) -> ContextResolution:
     """Decide whether context is relevant and whether a reference is resolvable."""
+    if _has_local_plural_antecedent(question):
+        return ContextResolution(False, None, None, None)
+
     mode = reference_mode(question)
     if mode is None:
         return ContextResolution(False, None, None, None)

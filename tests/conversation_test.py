@@ -51,6 +51,26 @@ def _product_context(count: int = 3) -> dict:
 
 
 def run_offline_tests() -> None:
+    # Local plural references can point to an entity set defined earlier in the same question.
+    local_reference = resolve_conversation_context(
+        "找出增长超过10%且毛利率下降的门店，并分析这些门店的SKU。",
+        None,
+    )
+    assert not local_reference.use_context
+    assert local_reference.reference_mode is None
+    assert local_reference.clarification_question is None
+    print("Local current-question plural reference: PASS")
+
+    # Without a local antecedent or previous context, the same plural expression must clarify.
+    missing_plural_context = resolve_conversation_context(
+        "这些门店Q2毛利率怎么样？",
+        None,
+    )
+    assert not missing_plural_context.use_context
+    assert missing_plural_context.reference_mode == "plural"
+    assert missing_plural_context.clarification_question
+    print("Missing plural context clarification: PASS")
+
     # Case 1: one store can satisfy a singular reference.
     store_context = _store_context()
     case1 = resolve_conversation_context("那它Q2的毛利率是多少？", store_context)
@@ -92,6 +112,18 @@ def run_offline_tests() -> None:
     assert case4.use_context
     assert all(store_id in (case4.prompt_context or "") for store_id in ("S003", "S001"))
     print("Case 4 multi-entity plural reference: PASS")
+
+    explicit_plural = resolve_conversation_context(
+        "这些门店Q2毛利率怎么样？",
+        two_store_context,
+    )
+    assert explicit_plural.use_context
+    assert explicit_plural.reference_mode == "plural"
+    assert all(
+        store_id in (explicit_plural.prompt_context or "")
+        for store_id in ("S003", "S001")
+    )
+    print("Case 4b explicit plural store reference: PASS")
 
     # Case 5: a complete new question ignores an unrelated previous context.
     case5 = resolve_conversation_context("查询S003 2025年Q2毛利率。", store_context)

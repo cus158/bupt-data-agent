@@ -33,12 +33,14 @@ GOLDEN_PATH = EVALUATION_DIR / "golden_results.json"
 REPORT_PATH = OUTPUTS_DIR / "online_test_report.txt"
 
 QUESTIONS = [
-    "查询2025年上半年各门店的成交销额，并按销额降序排列。",
-    "查询2025年上半年华东战区即时零售动销最好的3个SKU。",
-    "计算2025年上半年各门店退损率，找出超过5%的门店，并分析主要退款原因。",
-    "比较2025年Q1和Q2各门店成交销额，找出增长超过10%的门店。",
-    "找出Q2相比Q1成交销额增长但毛利率下降的门店，并分析是否可能存在低毛利SKU放量拖累。",
+    "查询 2025 年上半年每家门店的销售额，从高到低排序，并画一个销售额柱状图。",
+    "查询 2025 年上半年华东战区即时零售渠道动销最好的 3 个 SKU，按销额排序，并给出每个 SKU 的销量、销额和所属品类。",
+    "查询各门店 2025 年上半年的退损情况，找出退损率超过 5% 的门店，画出各门店退损率对比图，并分析退损率较高门店的主要退款原因。",
+    "比较每家门店 2025 年第一季度和第二季度的销售额，找出第二季度销售额比第一季度增长超过 10% 的门店，并生成两个季度销售额对比图。",
+    "找出 2025 年第二季度销额比第一季度增长超过 10%，但毛利率下降的门店。进一步分析这些门店是否存在低毛利 SKU 放量导致整体毛利率下降，并生成合适的图表。",
 ]
+
+CHART_EXPECTATIONS = ("bar", "none", "required", "required", "required")
 
 
 def save_report(lines: list[str]) -> None:
@@ -359,9 +361,38 @@ def compare_q2(
     actual_order = unique_sequence(products)
     expected_amounts = {row["product_id"]: row["sales_amount"] for row in expected_rows}
     amount_column = find_metric_column(dataframe, products, expected_amounts, 0.01)
+    expected_quantities = {
+        row["product_id"]: row["sales_quantity"] for row in expected_rows
+    }
+    quantity_column = find_metric_column(
+        dataframe,
+        products,
+        expected_quantities,
+        0.0,
+        preferred_columns=("sales_quantity", "quantity", "total_quantity", "qty"),
+    )
+    expected_categories = {
+        row["product_id"]: str(row["category"]) for row in expected_rows
+    }
+    category_column = None
+    for column in dataframe.columns:
+        if all(
+            expected_category
+            in dataframe.loc[products == product_id, column].dropna().astype(str).tolist()
+            for product_id, expected_category in expected_categories.items()
+        ):
+            category_column = column
+            break
     messages = [f"SKU排名 actual={actual_order}, expected={expected_order}"]
     messages.append(f"销额列匹配={amount_column[0] if amount_column else 'none'}")
-    return actual_order == expected_order and amount_column is not None, messages
+    messages.append(f"销量列匹配={quantity_column[0] if quantity_column else 'none'}")
+    messages.append(f"品类列匹配={category_column or 'none'}")
+    return (
+        actual_order == expected_order
+        and amount_column is not None
+        and quantity_column is not None
+        and category_column is not None
+    ), messages
 
 
 def compare_q3(
@@ -413,8 +444,13 @@ def compare_q3(
             expected_amounts,
         )
     conclusion_ok = "质量问题" in conclusion and "不符合预期" in conclusion
+    actual_high_stores: list[str] = []
+    if rate_column:
+        rate_values = numeric_series(dataframe, rate_column[0]) / rate_column[1]
+        actual_high_stores = unique_sequence(stores[rate_values > 0.05])
     messages = [
-        f"高退损门店 actual={actual_stores}, expected={expected_stores}",
+        f"返回门店={actual_stores}",
+        f"高退损门店 actual={actual_high_stores}, expected={expected_stores}",
         f"退损率列匹配={rate_column[0] if rate_column else 'none'}",
         f"退款原因列匹配={reason_column or 'none'}",
         f"退款金额列匹配={amount_column or 'none'}",
@@ -432,7 +468,7 @@ def compare_q3(
         )
     )
     passed = (
-        set(actual_stores) == set(expected_stores)
+        set(actual_high_stores) == set(expected_stores)
         and rate_column is not None
         and reason_column is not None
         and amount_column is not None
@@ -474,7 +510,14 @@ def compare_q4(
         preferred_columns=growth_columns,
         relative_tolerance=0.001,
     )
-    messages = [f"门店 actual={actual_order}, expected={expected_order}"]
+    actual_qualifying: list[str] = []
+    if growth_column:
+        growth_values = numeric_series(dataframe, growth_column[0]) / growth_column[1]
+        actual_qualifying = unique_sequence(stores[growth_values > 0.10])
+    messages = [
+        f"返回门店={actual_order}",
+        f"增长超过10%门店 actual={actual_qualifying}, expected={expected_order}",
+    ]
     messages.append(f"增长率列匹配={growth_column[0] if growth_column else 'none'}")
     messages.extend(
         rate_metric_diagnostics(
@@ -487,7 +530,7 @@ def compare_q4(
             absolute_tolerance=0.0001,
         )
     )
-    return actual_order == expected_order and growth_column is not None, messages
+    return actual_qualifying == expected_order and growth_column is not None, messages
 
 
 def compare_q5(
@@ -509,10 +552,32 @@ def compare_q5(
     q1_margins = {row["store_id"]: row["q1_gross_margin_rate"] for row in store_rows}
     q2_margins = {row["store_id"]: row["q2_gross_margin_rate"] for row in store_rows}
     q1_column = find_metric_column(
-        dataframe, stores, q1_margins, 0.00001, allow_percent_scale=True
+        dataframe,
+        stores,
+        q1_margins,
+        0.0001,
+        allow_percent_scale=True,
+        preferred_columns=(
+            "q1_gross_margin_rate",
+            "q1_gross_margin",
+            "q1_gross_margin_pct",
+            "q1_margin",
+        ),
+        relative_tolerance=0.001,
     )
     q2_column = find_metric_column(
-        dataframe, stores, q2_margins, 0.00001, allow_percent_scale=True
+        dataframe,
+        stores,
+        q2_margins,
+        0.0001,
+        allow_percent_scale=True,
+        preferred_columns=(
+            "q2_gross_margin_rate",
+            "q2_gross_margin",
+            "q2_gross_margin_pct",
+            "q2_margin",
+        ),
+        relative_tolerance=0.001,
     )
 
     expected_focus_pairs: set[tuple[str, str]] = set()
@@ -542,7 +607,7 @@ def compare_q5(
         f"Q1毛利率列匹配={q1_column[0] if q1_column else 'none'}",
         f"Q2毛利率列匹配={q2_column[0] if q2_column else 'none'}",
         f"Golden最低毛利SKU组合均出现={focus_ok}",
-        f"结论谨慎且覆盖三店={cautious and not causal_violation and conclusion_stores}",
+        f"结论谨慎且覆盖目标门店={cautious and not causal_violation and conclusion_stores}",
     ]
     passed = (
         set(actual_stores) == set(expected_stores)
@@ -642,7 +707,10 @@ def main() -> int:
     statuses: list[str] = []
     stop_remaining = False
 
-    for index, (question, comparator) in enumerate(zip(QUESTIONS, COMPARATORS), start=1):
+    for index, (question, comparator, chart_expectation) in enumerate(
+        zip(QUESTIONS, COMPARATORS, CHART_EXPECTATIONS),
+        start=1,
+    ):
         report.extend(["", "=" * 72, f"Q{index}", "用户原问题:", question])
         if stop_remaining:
             statuses.append("SKIPPED")
@@ -660,6 +728,18 @@ def main() -> int:
                 question,
             )
             report.append(f"图表路径: {chart_path if chart_path else 'none'}")
+            if chart_expectation == "none":
+                chart_ok = result.plan.chart_type == "none" and chart_path is None
+            elif chart_expectation == "required":
+                chart_ok = result.plan.chart_type != "none" and chart_path is not None
+            else:
+                chart_ok = (
+                    result.plan.chart_type == chart_expectation and chart_path is not None
+                )
+            report.append(
+                f"图表策略对比: actual={result.plan.chart_type}, "
+                f"expected={chart_expectation}, matched={chart_ok}"
+            )
             passed, comparison_messages = comparator(
                 result.query_result.dataframe,
                 golden,
@@ -667,6 +747,7 @@ def main() -> int:
                 product_names,
                 result.conclusion,
             )
+            passed = passed and chart_ok
             report.append("Golden Result 对比:")
             report.extend(f"- {message}" for message in comparison_messages)
             status = "PASS" if passed else "FAIL"

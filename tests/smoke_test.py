@@ -220,7 +220,8 @@ SELECT
         AS gross_margin_rate_change
 FROM store_metrics AS sm
 JOIN store_info AS st ON st.store_id = sm.store_id
-WHERE sm.q2_sales_amount > sm.q1_sales_amount
+WHERE (sm.q2_sales_amount - sm.q1_sales_amount)
+          / NULLIF(sm.q1_sales_amount, 0) > 0.10
   AND sm.q2_gross_margin_rate < sm.q1_gross_margin_rate
 ORDER BY sm.store_id;
 """
@@ -259,7 +260,8 @@ target_stores AS (
         store_id,
         q2_sales_amount
     FROM store_quarterly
-    WHERE q2_sales_amount > q1_sales_amount
+    WHERE (q2_sales_amount - q1_sales_amount)
+              / NULLIF(q1_sales_amount, 0) > 0.10
       AND q2_gross_profit / NULLIF(q2_sales_amount, 0)
           < q1_gross_profit / NULLIF(q1_sales_amount, 0)
 ),
@@ -454,9 +456,9 @@ def test_5_stores(conn: sqlite3.Connection) -> list[dict[str, object]]:
         TEST_5_STORES_SQL,
         rows,
     )
-    assert [row["store_id"] for row in rows] == ["S001", "S002", "S003"]
+    assert [row["store_id"] for row in rows] == ["S001", "S003"]
     for row in rows:
-        assert row["q2_sales_amount"] > row["q1_sales_amount"]
+        assert row["sales_growth"] > 0.10
         assert row["q2_gross_margin_rate"] < row["q1_gross_margin_rate"]
         assert_close(
             row["gross_margin_rate_change"],
@@ -470,9 +472,9 @@ def test_5_stores(conn: sqlite3.Connection) -> list[dict[str, object]]:
 def test_5_skus(conn: sqlite3.Connection) -> list[dict[str, object]]:
     rows = conn.execute(TEST_5_SKUS_SQL).fetchall()
     print_result("Test 5 detail - SKU evidence", TEST_5_SKUS_SQL, rows)
-    assert {row["store_id"] for row in rows} == {"S001", "S002", "S003"}
-    assert len(rows) == 36
-    for store_id in ("S001", "S002", "S003"):
+    assert {row["store_id"] for row in rows} == {"S001", "S003"}
+    assert len(rows) == 24
+    for store_id in ("S001", "S003"):
         store_rows = [row for row in rows if row["store_id"] == store_id]
         assert_close(
             sum(row["q2_sales_share"] for row in store_rows),
