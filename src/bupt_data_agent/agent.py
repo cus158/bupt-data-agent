@@ -82,6 +82,17 @@ class LLMConfig:
 
 
 @dataclass(frozen=True)
+class SemanticPlan:
+    intent: str | None = None
+    metrics: tuple[str, ...] = ()
+    dimensions: tuple[str, ...] = ()
+    time_range: str | None = None
+    filters: tuple[str, ...] = ()
+    tables: tuple[str, ...] = ()
+    visualization_intent: str | None = None
+
+
+@dataclass(frozen=True)
 class SQLPlan:
     sql: str | None
     reasoning_summary: str
@@ -89,6 +100,7 @@ class SQLPlan:
     status: str = "ready"
     clarification_question: str | None = None
     ambiguity_type: str | None = None
+    semantic_plan: SemanticPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +255,15 @@ Return exactly one JSON object with exactly these keys:
   "status": "ready|needs_clarification",
   "clarification_question": null,
   "ambiguity_type": null,
+  "semantic_plan": {{
+    "intent": "ranking|aggregation|comparison|trend|ratio_analysis|drill_down|detail_query",
+    "metrics": ["business metric names"],
+    "dimensions": ["analysis dimensions"],
+    "time_range": "concise business time range",
+    "filters": ["explicit filters and thresholds"],
+    "tables": ["real SQLite table names"],
+    "visualization_intent": "none|bar|line|pie|auto"
+  }},
   "sql": "one SQLite read-only query",
   "reasoning_summary": "a short summary of tables, metric and filters used",
   "chart_type": "bar|line|pie|none"
@@ -251,6 +272,20 @@ Return exactly one JSON object with exactly these keys:
 Do not output Markdown fences. Do not reveal private chain-of-thought. The
 reasoning_summary must be at most three short sentences and only explain which tables,
 business metric, date range and filters were used.
+
+Semantic-plan rules:
+1. semantic_plan is a concise structured business interpretation, not private
+   chain-of-thought and not a replacement for SQL.
+2. Use business names from the supplied Markdown for metrics and dimensions. Its
+   filters must preserve the user's explicit conditions and thresholds exactly.
+3. tables may contain only names from the supplied actual SQLite schema, and the plan
+   must remain semantically consistent with the final SQL.
+4. visualization_intent describes the user's request: none when no chart is requested,
+   a named type for an explicit bar/line/pie request, and auto for a chart request with
+   no explicit type. Final chart_type still follows the chart rules below.
+5. If clarification is required, clarification takes priority. Do not invent SQL or
+   semantic details merely to fill this object. A repaired response must return an
+   updated semantic_plan consistent with its corrected SQL.
 
 Intent-completeness rules (apply before writing SQL):
 1. First decide whether the question has enough information for one reliable business
@@ -344,6 +379,45 @@ Business knowledge from all Markdown files:
 """
 
 
+def _parse_semantic_plan(payload: Any) -> SemanticPlan | None:
+    """Parse optional explanatory metadata without weakening core plan validation."""
+    if not isinstance(payload, dict):
+        return None
+
+    def optional_text(name: str) -> str | None:
+        value = payload.get(name)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    def text_items(name: str) -> tuple[str, ...]:
+        value = payload.get(name)
+        if not isinstance(value, list):
+            return ()
+        return tuple(
+            item.strip()
+            for item in value
+            if isinstance(item, str) and item.strip()
+        )
+
+    tables = tuple(
+        table for table in text_items("tables") if table in REAL_TABLE_NAMES
+    )
+    visualization_intent = optional_text("visualization_intent")
+    if visualization_intent:
+        visualization_intent = visualization_intent.lower()
+        if visualization_intent not in CHART_TYPES | {"auto"}:
+            visualization_intent = None
+
+    return SemanticPlan(
+        intent=optional_text("intent"),
+        metrics=text_items("metrics"),
+        dimensions=text_items("dimensions"),
+        time_range=optional_text("time_range"),
+        filters=text_items("filters"),
+        tables=tables,
+        visualization_intent=visualization_intent,
+    )
+
+
 def _parse_sql_plan(payload: Any) -> SQLPlan:
     if not isinstance(payload, dict):
         raise LLMResponseError("LLM response must be a JSON object")
@@ -355,9 +429,11 @@ def _parse_sql_plan(payload: Any) -> SQLPlan:
         "reasoning_summary",
         "chart_type",
     }
-    if set(payload) != required_keys:
+    allowed_keys = required_keys | {"semantic_plan"}
+    if not required_keys.issubset(payload) or not set(payload).issubset(allowed_keys):
         raise LLMResponseError(
-            f"LLM JSON keys must be exactly {sorted(required_keys)}; "
+            f"LLM JSON must contain {sorted(required_keys)} and may include "
+            f"semantic_plan; "
             f"received {sorted(payload)}"
         )
 
@@ -404,6 +480,7 @@ def _parse_sql_plan(payload: Any) -> SQLPlan:
             else None
         ),
         ambiguity_type=ambiguity_type.strip() if isinstance(ambiguity_type, str) else None,
+        semantic_plan=_parse_semantic_plan(payload.get("semantic_plan")),
     )
 
 
@@ -484,6 +561,7 @@ def generate_sql_plan(
         status=plan.status,
         clarification_question=plan.clarification_question,
         ambiguity_type=plan.ambiguity_type,
+        semantic_plan=plan.semantic_plan,
     )
 
 
@@ -524,6 +602,7 @@ system rules. Do not explain the error outside reasoning_summary."""
         status=plan.status,
         clarification_question=plan.clarification_question,
         ambiguity_type=plan.ambiguity_type,
+        semantic_plan=plan.semantic_plan,
     )
 
 

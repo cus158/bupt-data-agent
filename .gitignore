@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 outputs/
 data/business.db
+data/chat_history.db
 .venv/
 .venv_test/
 venv/
