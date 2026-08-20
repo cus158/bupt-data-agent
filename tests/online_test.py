@@ -21,7 +21,6 @@ from bupt_data_agent.agent import (
     SQLExecutionError,
     SQLPlan,
     SQLSafetyError,
-    create_chart,
     execute_query,
     load_config,
     run_agent,
@@ -631,6 +630,30 @@ COMPARATORS: list[Callable] = [
 
 
 def add_trace_to_report(lines: list[str], trace: dict) -> None:
+    task_results = trace.get("task_results") or ()
+    if task_results:
+        lines.append(f"分析任务数: {len(task_results)}")
+        for index, task_result in enumerate(task_results, 1):
+            lines.extend(
+                [
+                    f"任务 {index}: {task_result.task.question}",
+                    f"状态: {task_result.status}",
+                    "执行 SQL:",
+                    task_result.task.sql,
+                    f"图表: {task_result.chart_path or 'none'}",
+                ]
+            )
+            if task_result.status == "failed":
+                lines.append(
+                    f"任务错误: {task_result.error_type}: {task_result.error_message}"
+                )
+            elif task_result.query_result is not None:
+                lines.append(
+                    task_result.query_result.dataframe.to_string(
+                        index=False, na_rep="NULL", max_rows=200
+                    )
+                )
+
     first_plan: SQLPlan | None = trace.get("first_plan")
     if first_plan:
         lines.extend(
@@ -721,23 +744,39 @@ def main() -> int:
         try:
             result = run_agent(question, trace=trace)
             add_trace_to_report(report, trace)
-            report.append(f"图表类型: {result.plan.chart_type}")
-            chart_path = create_chart(
-                result.query_result.dataframe,
-                result.plan.chart_type,
-                question,
+            if result.query_result is None:
+                raise RuntimeError("No successful query result was returned")
+            task_results = result.task_results
+            chart_types = (
+                [item.task.chart_type for item in task_results]
+                if task_results
+                else [result.plan.chart_type]
             )
-            report.append(f"图表路径: {chart_path if chart_path else 'none'}")
+            chart_paths = (
+                [item.chart_path for item in task_results]
+                if task_results
+                else []
+            )
+            report.append(f"图表类型: {chart_types}")
+            report.append(
+                "图表路径: "
+                + (", ".join(str(path) for path in chart_paths if path) or "none")
+            )
             if chart_expectation == "none":
-                chart_ok = result.plan.chart_type == "none" and chart_path is None
+                chart_ok = all(item == "none" for item in chart_types) and not any(
+                    chart_paths
+                )
             elif chart_expectation == "required":
-                chart_ok = result.plan.chart_type != "none" and chart_path is not None
+                chart_ok = any(item != "none" for item in chart_types) and any(
+                    chart_paths
+                )
             else:
-                chart_ok = (
-                    result.plan.chart_type == chart_expectation and chart_path is not None
+                chart_ok = any(
+                    chart_type == chart_expectation and chart_path is not None
+                    for chart_type, chart_path in zip(chart_types, chart_paths)
                 )
             report.append(
-                f"图表策略对比: actual={result.plan.chart_type}, "
+                f"图表策略对比: actual={chart_types}, "
                 f"expected={chart_expectation}, matched={chart_ok}"
             )
             passed, comparison_messages = comparator(

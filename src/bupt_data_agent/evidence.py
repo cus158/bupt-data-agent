@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Iterable
+from typing import Any
 
 from .business_validator import BusinessValidationResult
 from .paths import DB_PATH, KNOWLEDGE_DIR
@@ -180,12 +182,23 @@ def _extract_filters(sql: str) -> list[str]:
     sql_without_qualifiers = re.sub(r"\b[A-Za-z_]\w*\.", "", sql)
     filters: list[str] = []
     for field, value in re.findall(
-        r"\b(region|channel_code|category|city|store_id|product_id)"
+        r"\b(region|channel_code|category|city|store_id|product_id|refund_reason)"
         r"\s*=\s*'([^']+)'",
         sql_without_qualifiers,
         flags=re.IGNORECASE,
     ):
         filters.append(f"{field.lower()} = '{value}'")
+
+    for field, raw_values in re.findall(
+        r"\b(region|channel_code|category|city|store_id|product_id|refund_reason)"
+        r"\s+in\s*\(([^)]+)\)",
+        sql_without_qualifiers,
+        flags=re.IGNORECASE,
+    ):
+        values = re.findall(r"'((?:''|[^'])*)'", raw_values)
+        if values:
+            display_values = ", ".join(f"'{value}'" for value in values)
+            filters.append(f"{field.lower()} IN ({display_values})")
 
     if "refund" in normalized and re.search(r">\s*0?\.0*5\b", normalized):
         filters.append("退损率 > 5%")
@@ -237,6 +250,8 @@ def _extract_aggregation(sql: str) -> list[str]:
         items.append("按 SKU 聚合 / 下钻（product_id）")
     if "refund_reason" in grouped:
         items.append("按退款原因聚合（refund_reason）")
+    if "category" in grouped:
+        items.append("按商品类别聚合（category）")
     if "q1" in normalized and "q2" in normalized:
         items.append("按 Q1 / Q2 分期汇总")
 
@@ -370,3 +385,33 @@ def build_query_evidence(
         ] if business_validation else [],
         "status": status,
     }
+
+
+def build_analysis_evidence(
+    tasks: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build task-scoped evidence without merging unrelated SQL statements.
+
+    Each input item must provide task_id, question, and sql; an optional
+    business_validation value is forwarded to the existing single-query extractor.
+    """
+    results: list[dict[str, Any]] = []
+    for item in tasks:
+        task_id = str(item.get("task_id") or "").strip()
+        question = str(item.get("question") or "").strip()
+        sql = str(item.get("sql") or "").strip()
+        if not task_id or not question or not sql:
+            raise ValueError("Each evidence task requires task_id, question, and sql")
+        results.append(
+            {
+                "task_id": task_id,
+                "question": question,
+                "sql": sql,
+                "evidence": build_query_evidence(
+                    sql,
+                    question,
+                    item.get("business_validation"),
+                ),
+            }
+        )
+    return results

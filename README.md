@@ -27,15 +27,15 @@
    - 即时零售 → `sales_order.channel_code = 'O2O'`
    - SKU → `product_info.product_id`
 3. **动态 Schema 感知**：通过 SQLite `PRAGMA table_info` 和外键信息读取真实数据库结构，而非在 Prompt 中写死 Schema。
-4. **Text-to-SQL 与 SemanticPlan**：LLM 综合“用户问题 + 业务知识 + Schema + Temporal Context + 可选对话上下文”，在同一次调用中返回结构化问题理解和 SQLite 兼容的只读 SQL。
+4. **多任务 Text-to-SQL 与 SemanticPlan**：LLM 综合“用户问题 + 业务知识 + Schema + Temporal Context + 可选对话上下文”，在同一次调用中先拆分可独立查询的分析目标，再返回 `AnalysisPlan.tasks[]`；每个任务拥有自己的 SemanticPlan 和 SQLite 只读 SQL。
 5. **歧义识别与主动澄清**：当指标或指代无法唯一确定时返回简洁澄清问题，不生成或执行 SQL；能由业务知识和数据库上下文唯一确定时自动消歧。
 6. **SQL 安全执行**：只允许 `SELECT` 或合法的 `WITH ... SELECT`，拒绝写操作、DDL、管理语句和多语句执行；数据库同时使用只读 URI、`query_only` 和 SQLite authorizer，并限制查询结果行数。LLM 不会生成并执行任意 Python。
 7. **Business Rule Validator**：在 SQL Safety 之后确定性检查成交销额、汇总毛利率、退款时间、退损率等高置信度业务规则错误。
-8. **有限错误恢复**：SQL 安全、业务规则或执行阶段失败时共享一次 repair budget，修复后的 SQL 会重新经过安全与业务规则校验。
+8. **任务级错误恢复与隔离**：每个任务在 SQL 安全、业务规则或执行阶段失败时拥有一次 repair budget，修复后的 SQL 会重新经过安全与业务规则校验；单个任务最终失败不会丢弃其他成功结果。
 9. **轻量多轮上下文**：从真实 DataFrame 提取上一轮门店、SKU、时间和指标，仅在当前问题包含指代或省略时补全条件；聊天记录独立持久化到本地 `chat_history.db`。
-10. **按需可视化**：查询结果以 pandas DataFrame 返回；用户明确要求绘图时生成 `bar`、`line` 或 `pie`，未提出绘图需求时默认不画图。
-11. **自然语言总结**：模型只能依据实际 SQL 结果总结。无法证明因果关系时，使用“可能”“数据显示”“存在拖累迹象”等谨慎表达。
-12. **查询依据展示**：展示实际使用的数据表、业务口径、时间范围、筛选聚合和校验状态，不公开 Chain-of-Thought。
+10. **任务级按需可视化**：每个任务独立决定是否生成 `bar`、`line` 或 `pie`，一次问题可产生 0～N 张图；未提出绘图需求时默认不画图。
+11. **统一自然语言总结**：所有任务完成后，模型一次性接收各任务描述、SQL、字段、真实查询结果或失败信息，生成覆盖原问题全部子目标的综合结论。
+12. **任务级查询依据展示**：按任务分别展示实际使用的数据表、业务口径、时间范围、筛选聚合、SQL 和校验状态，不混合多个 SQL，也不公开 Chain-of-Thought。
 
 > `business_terms.md` 中保留了题目描述使用的 `dim_store` / `dim_product` 名称；Agent 会明确纠正为真实表名 `store_info` / `product_info`。
 
@@ -77,24 +77,19 @@
             ▼
 ┌───────────────────────┐
 │          LLM          │
-│ SemanticPlan + SQLPlan│
+│ AnalysisPlan + tasks[]│
 └───────────┬───────────┘
             ▼
 ┌───────────────────────┐
-│   SQL Safety Layer    │
+│ for task in tasks     │
+│ SQL Safety + Validator│
+│ SQLite + Evidence     │
+│ Optional Chart        │
 └───────────┬───────────┘
             ▼
 ┌───────────────────────┐
-│Business Rule Validator│
-└───────────┬───────────┘
-            ▼
-┌───────────────────────┐
-│ SQLite Read-only Query│
-└───────────┬───────────┘
-            ▼
-┌───────────────────────┐
-│ DataFrame + Summary   │
-│ Chart + Evidence      │
+│ Aggregate TaskResults │
+│ One Final Summary     │
 └───────────┬───────────┘
             ▼
  Streamlit / CLI 分析结果
@@ -102,11 +97,12 @@
 
 - **Conversation Resolver**：只使用最近一轮结构化上下文解决“它”“这些门店”等追问；无法唯一解析时先澄清。
 - **Context Builder**：加载 Markdown、真实表结构、外键和动态日期范围。
-- **LLM Text-to-SQL**：理解问题并在一次调用中输出 SemanticPlan、SQLPlan 和图表类型。
+- **LLM Task Planner / Text-to-SQL**：理解问题并在一次调用中输出 `AnalysisPlan`；同一分组维度的多个指标保留为一个任务，不同对象或独立聚合目标拆成多个任务。
 - **SQL Safety Layer**：完成语句类型、危险关键字、多语句和 SQLite authorizer 检查。
 - **Business Rule Validator**：确定性检查 SQL 是否明显违反业务指标口径。
 - **SQLite / pandas**：负责确定性的数值计算和结构化结果承载。
-- **结果层**：基于真实结果生成谨慎结论、按需图表和可审计 Evidence，并由 Streamlit 或 CLI 展示。
+- **统一任务执行器**：串行执行 `tasks[]`；每条 SQL 都经过相同的安全、业务和只读执行链，错误按任务隔离。
+- **结果层**：每个 TaskResult 保存 DataFrame、Evidence、图表路径或错误，所有任务完成后统一总结，并由 Streamlit 或 CLI 按任务展示。
 
 ## 数据表关系
 
@@ -254,6 +250,7 @@ python tests/conversation_test.py
 python tests/semantic_plan_test.py
 python tests/chat_history_test.py
 python tests/streamlit_app_test.py
+python tests/multi_task_test.py
 ```
 
 ### 7. 运行真实 LLM 在线测试

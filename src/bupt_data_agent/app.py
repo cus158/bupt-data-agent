@@ -1,4 +1,4 @@
-"""Command-line interface for the minimal Text-to-SQL agent."""
+"""Command-line interface for the task-based Text-to-SQL agent."""
 
 from __future__ import annotations
 
@@ -50,45 +50,61 @@ def main() -> int:
         print(result.plan.clarification_question)
         return 0
 
-    if result.query_result is None:
-        section("运行错误")
-        print("查询未返回可展示的结果。")
-        return 3
+    if result.task_results:
+        for index, task_result in enumerate(result.task_results, 1):
+            section(f"分析任务 {index}：{task_result.task.question}")
+            print("SQL：")
+            print(task_result.task.sql)
+            print("\nSQL解释：")
+            print(task_result.task.reasoning_summary)
+            if task_result.status == "failed":
+                print(
+                    f"\n执行失败：{task_result.error_type}: "
+                    f"{task_result.error_message}"
+                )
+                continue
 
-    section("生成 SQL")
-    print(result.plan.sql)
-
-    section("SQL解释")
-    print(result.plan.reasoning_summary)
-
-    section("查询结果")
-    dataframe = result.query_result.dataframe
-    if dataframe.empty:
-        print("（空结果）")
+            query_result = task_result.query_result
+            assert query_result is not None
+            print("\n查询结果：")
+            if query_result.dataframe.empty:
+                print("（空结果）")
+            else:
+                print(
+                    query_result.dataframe.to_string(
+                        index=False,
+                        na_rep="NULL",
+                        max_rows=MAX_RESULT_ROWS,
+                    )
+                )
+            if query_result.truncated:
+                print(
+                    f"\n结果超过 {MAX_RESULT_ROWS} 行，当前仅展示前 "
+                    f"{MAX_RESULT_ROWS} 行。"
+                )
+            print("\n图表：")
+            if task_result.chart_path:
+                print(task_result.chart_path)
+            elif task_result.chart_error:
+                print(f"图表生成失败：{task_result.chart_error}")
+            else:
+                print("当前任务不需要或不适合生成图表。")
     else:
-        print(
-            dataframe.to_string(
-                index=False,
-                na_rep="NULL",
-                max_rows=MAX_RESULT_ROWS,
-            )
-        )
-    if result.query_result.truncated:
-        print(f"\n结果超过 {MAX_RESULT_ROWS} 行，当前仅展示前 {MAX_RESULT_ROWS} 行。")
-
-    section("分析结论")
-    print(result.conclusion)
-
-    section("图表")
-    try:
+        # Compatibility for older AgentResult producers.
+        if result.query_result is None:
+            section("运行错误")
+            print("查询未返回可展示的结果。")
+            return 3
+        section("分析任务 1")
+        print(result.plan.sql)
+        dataframe = result.query_result.dataframe
+        print(dataframe.to_string(index=False, na_rep="NULL", max_rows=MAX_RESULT_ROWS))
         chart_path = create_chart(dataframe, result.plan.chart_type, question)
-    except Exception as exc:
-        print(f"图表生成失败：{type(exc).__name__}: {exc}")
-    else:
         if chart_path:
             print(chart_path)
-        else:
-            print("当前结果不需要或不适合生成图表。")
+
+    section("综合结论")
+    print(result.conclusion)
     return 0
 
 

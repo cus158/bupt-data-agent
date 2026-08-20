@@ -23,6 +23,7 @@ from bupt_data_agent.agent import (
     MAX_RESULT_ROWS,
     SQLExecutionError,
     SQLSafetyError,
+    TaskResult,
     create_chart,
     run_agent,
 )
@@ -303,11 +304,26 @@ def _assistant_payload(message: dict[str, Any]) -> dict[str, Any]:
     details = message.get("details")
     if isinstance(details, dict):
         serializable_details = {
-            key: value for key, value in details.items() if key != "dataframe"
+            key: value
+            for key, value in details.items()
+            if key not in {"dataframe", "tasks"}
         }
         dataframe = details.get("dataframe")
         if isinstance(dataframe, pd.DataFrame):
             serializable_details["query_data"] = _dataframe_payload(dataframe)
+        task_details = details.get("tasks")
+        if isinstance(task_details, list):
+            serializable_details["tasks"] = []
+            for task in task_details:
+                if not isinstance(task, dict):
+                    continue
+                serializable_task = {
+                    key: value for key, value in task.items() if key != "dataframe"
+                }
+                task_dataframe = task.get("dataframe")
+                if isinstance(task_dataframe, pd.DataFrame):
+                    serializable_task["query_data"] = _dataframe_payload(task_dataframe)
+                serializable_details["tasks"].append(serializable_task)
         payload["details"] = serializable_details
     if message.get("semantic_plan") is not None:
         payload["semantic_plan"] = message["semantic_plan"]
@@ -342,6 +358,23 @@ def _restore_message(stored_message: dict[str, Any]) -> dict[str, Any]:
                 dataframe = pd.DataFrame(records, columns=columns)
         details["dataframe"] = dataframe
         details["query_data_saved"] = dataframe is not None
+        restored_tasks: list[dict[str, Any]] = []
+        for task in details.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            restored_task = task.copy()
+            task_query_data = restored_task.pop("query_data", None)
+            task_dataframe: pd.DataFrame | None = None
+            if isinstance(task_query_data, dict):
+                task_columns = task_query_data.get("columns")
+                task_records = task_query_data.get("records")
+                if isinstance(task_columns, list) and isinstance(task_records, list):
+                    task_dataframe = pd.DataFrame(task_records, columns=task_columns)
+            restored_task["dataframe"] = task_dataframe
+            restored_task["query_data_saved"] = task_dataframe is not None
+            restored_tasks.append(restored_task)
+        if "tasks" in details:
+            details["tasks"] = restored_tasks
         message["details"] = details
     return message
 
@@ -419,15 +452,137 @@ def show_sidebar() -> None:
                 st.caption("Enabled")
 
 
+def _validation_details(validation: Any) -> dict[str, Any]:
+    return {
+        "business_validation_valid": bool(validation and validation.valid),
+        "business_warnings": (
+            [warning.message for warning in validation.warnings]
+            if validation
+            else []
+        ),
+    }
+
+
+def _task_result_details(task_result: TaskResult) -> dict[str, Any]:
+    task = task_result.task
+    query_result = task_result.query_result
+    details: dict[str, Any] = {
+        "task_id": task.task_id,
+        "question": task.question,
+        "status": task_result.status,
+        "semantic_plan": asdict(task.semantic_plan) if task.semantic_plan else None,
+        "sql": task.sql,
+        "reasoning_summary": task.reasoning_summary,
+        "visualization": asdict(task.visualization),
+        "chart_type": task.chart_type,
+        "chart_path": str(task_result.chart_path) if task_result.chart_path else None,
+        "chart_error": (
+            "图表生成失败，但不影响查询结果与分析结论。"
+            if task_result.chart_error
+            else None
+        ),
+        "evidence": task_result.evidence,
+        "evidence_error": (
+            "查询依据生成失败，但不影响实际查询结果。"
+            if task_result.evidence_error
+            else None
+        ),
+        "sql_safety_valid": task_result.status == "success",
+        "repair_triggered": task_result.repair_triggered,
+        "first_error_type": task_result.first_error_type,
+        "error_type": task_result.error_type,
+        "error_message": task_result.error_message,
+        "dataframe": query_result.dataframe.copy() if query_result else None,
+        "truncated": query_result.truncated if query_result else False,
+    }
+    details.update(_validation_details(task_result.business_validation))
+    return details
+
+
+def _legacy_task_details(
+    question: str,
+    result: Any,
+    previous_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Adapt older mocked/saved AgentResult objects to one task."""
+    if result.query_result is None or result.plan.sql is None:
+        raise AgentError("Ready plan did not return an executable query result")
+    chart_path: str | None = None
+    chart_error: str | None = None
+    if result.plan.chart_type != "none":
+        try:
+            generated_path = create_chart(
+                result.query_result.dataframe,
+                result.plan.chart_type,
+                question,
+            )
+            chart_path = str(generated_path) if generated_path else None
+        except Exception:
+            logging.exception("Chart generation failed")
+            chart_error = "图表生成失败，但不影响查询结果与分析结论。"
+
+    evidence = None
+    evidence_error = None
+    try:
+        evidence = build_query_evidence(
+            result.plan.sql,
+            question,
+            result.business_validation,
+        )
+        if result.conversation_context_used:
+            summary = context_display_summary(previous_context)
+            evidence.setdefault("notes", []).insert(
+                0,
+                "对话上下文：本任务使用了上一轮结构化查询上下文"
+                + (f"（{summary}）" if summary else "。"),
+            )
+    except Exception:
+        logging.exception("Query evidence generation failed")
+        evidence_error = "查询依据生成失败，但不影响实际查询结果。"
+
+    semantic_plan = (
+        asdict(result.plan.semantic_plan) if result.plan.semantic_plan else None
+    )
+    details = {
+        "task_id": "task_1",
+        "question": question,
+        "status": "success",
+        "semantic_plan": semantic_plan,
+        "sql": result.plan.sql,
+        "reasoning_summary": result.plan.reasoning_summary,
+        "visualization": {
+            "required": result.plan.chart_type != "none",
+            "chart_type": result.plan.chart_type,
+            "x": None,
+            "y": [],
+            "title": question if result.plan.chart_type != "none" else None,
+        },
+        "dataframe": result.query_result.dataframe.copy(),
+        "truncated": result.query_result.truncated,
+        "chart_type": result.plan.chart_type,
+        "chart_path": chart_path,
+        "chart_error": chart_error,
+        "evidence": evidence,
+        "evidence_error": evidence_error,
+        "sql_safety_valid": True,
+        "repair_triggered": result.repair_triggered,
+        "first_error_type": result.first_error_type,
+        "error_type": None,
+        "error_message": None,
+    }
+    details.update(_validation_details(result.business_validation))
+    return details
+
+
 def analyze_question(question: str) -> dict[str, Any]:
-    """Run exactly one new Agent turn and build a persistable assistant message."""
+    """Run one Agent turn and persist all task-scoped results and artifacts."""
     previous_context = st.session_state.get("last_turn_context")
     try:
         result = run_agent(question, conversation_context=previous_context)
-        semantic_plan = (
-            asdict(result.plan.semantic_plan) if result.plan.semantic_plan else None
-        )
         if result.plan.status == "needs_clarification":
+            semantic_plan = (
+                asdict(result.plan.semantic_plan) if result.plan.semantic_plan else None
+            )
             return {
                 "role": "assistant",
                 "kind": "clarification",
@@ -435,64 +590,32 @@ def analyze_question(question: str) -> dict[str, Any]:
                 "ambiguity_type": result.plan.ambiguity_type,
                 "semantic_plan": semantic_plan,
             }
-        if result.query_result is None or result.plan.sql is None:
-            raise AgentError("Ready plan did not return an executable query result")
 
-        chart_path: str | None = None
-        chart_error: str | None = None
-        if result.plan.chart_type != "none":
-            try:
-                generated_path = create_chart(
-                    result.query_result.dataframe,
-                    result.plan.chart_type,
-                    question,
-                )
-                chart_path = str(generated_path) if generated_path else None
-            except Exception:
-                logging.exception("Chart generation failed")
-                chart_error = "图表生成失败，但不影响查询结果与分析结论。"
-
-        evidence = None
-        evidence_error = None
-        try:
-            evidence = build_query_evidence(
-                result.plan.sql, question, result.business_validation
-            )
-            if result.conversation_context_used:
-                summary = context_display_summary(previous_context)
-                evidence.setdefault("notes", []).insert(
-                    0,
-                    "对话上下文：本次问题使用了上一轮结构化查询上下文"
-                    + (f"（{summary}）" if summary else "。"),
-                )
-        except Exception:
-            logging.exception("Query evidence generation failed")
-            evidence_error = "查询依据生成失败，但不影响实际查询结果。"
-
-        validation = result.business_validation
-        details = {
+        task_details = (
+            [_task_result_details(item) for item in result.task_results]
+            if result.task_results
+            else [_legacy_task_details(question, result, previous_context)]
+        )
+        success_count = sum(item["status"] == "success" for item in task_details)
+        first_task = task_details[0]
+        details: dict[str, Any] = {
             "question": question,
-            "semantic_plan": semantic_plan,
-            "dataframe": result.query_result.dataframe.copy(),
-            "truncated": result.query_result.truncated,
-            "sql": result.plan.sql,
-            "chart_type": result.plan.chart_type,
-            "chart_path": chart_path,
-            "chart_error": chart_error,
-            "evidence": evidence,
-            "evidence_error": evidence_error,
-            "sql_safety_valid": True,
-            "business_validation_valid": bool(validation and validation.valid),
-            "business_warnings": (
-                [warning.message for warning in validation.warnings]
-                if validation
-                else []
-            ),
-            "repair_triggered": result.repair_triggered,
-            "first_error_type": result.first_error_type,
+            "tasks": task_details,
+            "task_count": len(task_details),
+            "success_count": success_count,
+            "failed_count": len(task_details) - success_count,
+            "semantic_plan": first_task.get("semantic_plan"),
             "conversation_context_used": result.conversation_context_used,
             "model": configured_model_name(),
         }
+        # Keep the former top-level fields for one-task history and integrations.
+        if len(task_details) == 1:
+            details.update(first_task)
+            details["tasks"] = task_details
+            details["task_count"] = 1
+            details["success_count"] = success_count
+            details["failed_count"] = 1 - success_count
+
         st.session_state["last_turn_context"] = result.turn_context
         return {
             "role": "assistant",
@@ -669,8 +792,12 @@ def show_semantic_plan(details: dict[str, Any]) -> None:
         st.markdown(f"**{label}**　{display}")
 
 
-def show_execution_process(details: dict[str, Any]) -> None:
-    with st.expander("问题理解与执行过程", expanded=False):
+def show_execution_process(
+    details: dict[str, Any],
+    *,
+    label: str = "问题理解与执行过程",
+) -> None:
+    with st.expander(label, expanded=False):
         st.markdown("#### ① 问题理解")
         show_semantic_plan(details)
         st.divider()
@@ -699,15 +826,20 @@ def show_execution_process(details: dict[str, Any]) -> None:
         dataframe = details.get("dataframe")
         row_count = len(dataframe) if isinstance(dataframe, pd.DataFrame) else "未保存"
         st.write("SQLite：Read-only")
-        st.write("执行状态：Success")
+        st.write(
+            "执行状态："
+            + ("Success" if details.get("status", "success") == "success" else "Failed")
+        )
         st.write(f"返回行数：{row_count}")
         st.write(f"结果截断：{'Yes' if details.get('truncated') else 'No'}")
+        if details.get("error_message"):
+            st.error(
+                f"{details.get('error_type') or 'TaskError'}: "
+                f"{details['error_message']}"
+            )
         st.divider()
         st.markdown("#### ⑤ 分析依据")
         show_evidence(details)
-        st.divider()
-        st.markdown("#### ⑥ 查询数据")
-        show_query_data(details)
 
 
 def render_assistant_message(message: dict[str, Any]) -> None:
@@ -715,21 +847,47 @@ def render_assistant_message(message: dict[str, Any]) -> None:
     if kind == "error":
         st.error(message["content"])
         return
-    st.markdown(message["content"])
     if kind == "clarification":
+        st.markdown(message["content"])
         st.caption("需要补充信息后才能生成可靠查询。")
         return
     details = message.get("details")
     if not isinstance(details, dict):
+        st.markdown(message["content"])
         return
-    chart_path = details.get("chart_path")
-    if chart_path and Path(chart_path).is_file():
-        st.image(chart_path, use_container_width=True)
-    elif chart_path:
-        st.caption("历史图表文件当前不可用，未重新生成。")
-    if details.get("chart_error"):
-        st.warning(details["chart_error"])
-    show_execution_process(details)
+    task_details = details.get("tasks")
+    if not isinstance(task_details, list) or not task_details:
+        task_details = [details]
+
+    for index, task in enumerate(task_details, 1):
+        task_question = task.get("question") or f"任务 {index}"
+        st.subheader(f"分析任务 {index}：{task_question}")
+        if task.get("status", "success") == "failed":
+            st.error(
+                f"任务执行失败：{task.get('error_type') or 'TaskError'}: "
+                f"{task.get('error_message') or '未知错误'}"
+            )
+        else:
+            show_query_data(task)
+            chart_path = task.get("chart_path")
+            if chart_path and Path(chart_path).is_file():
+                st.image(chart_path, use_container_width=True)
+            elif chart_path:
+                st.caption("历史图表文件当前不可用，未重新生成。")
+            if task.get("chart_error"):
+                st.warning(task["chart_error"])
+
+        process_label = (
+            "问题理解与执行过程"
+            if len(task_details) == 1
+            else f"分析任务 {index} 的执行过程"
+        )
+        show_execution_process(task, label=process_label)
+        if index < len(task_details):
+            st.divider()
+
+    st.markdown("### 综合结论")
+    st.markdown(message["content"])
 
 
 def render_chat_history() -> None:
